@@ -1,43 +1,47 @@
 package models
 
 import (
+	"errors"
+	"strings"
 	"sync"
 	"time"
+
+	"wireguard-web-manager/wireguard"
 
 	"github.com/google/uuid"
 )
 
 // Server представляет конфигурацию WireGuard сервера
 type Server struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	ListenPort  int       `json:"listen_port"`
-	PrivateKey  string    `json:"private_key"`
-	PublicKey   string    `json:"public_key"`
-	Network     string    `json:"network"` // например, 10.0.0.0/24
-	DNS         string    `json:"dns"`     // например, 8.8.8.8
-	AllowedIPs  string    `json:"allowed_ips"` // например, 0.0.0.0/0
-	Endpoint    string    `json:"endpoint"` // внешний IP:порт сервера
-	IsActive    bool      `json:"is_active"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	ListenPort int       `json:"listen_port"`
+	PrivateKey string    `json:"private_key"`
+	PublicKey  string    `json:"public_key"`
+	Network    string    `json:"network"`     // например, 10.0.0.0/24
+	DNS        string    `json:"dns"`         // например, 8.8.8.8
+	AllowedIPs string    `json:"allowed_ips"` // например, 0.0.0.0/0
+	Endpoint   string    `json:"endpoint"`    // внешний IP:порт сервера
+	IsActive   bool      `json:"is_active"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // Client представляет клиента WireGuard
 type Client struct {
-	ID          string    `json:"id"`
-	ServerID    string    `json:"server_id"`
-	Name        string    `json:"name"`
-	Email       string    `json:"email"`
-	PrivateKey  string    `json:"private_key"`
-	PublicKey   string    `json:"public_key"`
-	AllowedIPs  string    `json:"allowed_ips"` // IP адрес клиента в сети сервера
-	IsActive    bool      `json:"is_active"`
-	IsDisabled  bool      `json:"is_disabled"`
-	Downloaded  bool      `json:"downloaded"` // скачал ли клиент конфиг
-	DownloadAt  *time.Time `json:"download_at,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID         string     `json:"id"`
+	ServerID   string     `json:"server_id"`
+	Name       string     `json:"name"`
+	Email      string     `json:"email"`
+	PrivateKey string     `json:"private_key"`
+	PublicKey  string     `json:"public_key"`
+	AllowedIPs string     `json:"allowed_ips"` // IP адрес клиента в сети сервера
+	IsActive   bool       `json:"is_active"`
+	IsDisabled bool       `json:"is_disabled"`
+	Downloaded bool       `json:"downloaded"` // скачал ли клиент конфиг
+	DownloadAt *time.Time `json:"download_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
 // Stats представляет статистику по клиентам
@@ -58,27 +62,37 @@ type Storage struct {
 // Глобальное хранилище данных
 var GlobalStorage *Storage
 
-// InitStorage инициализирует глобальное хранилище
-func InitStorage() {
+// InitStorage инициализирует глобальное хранилище, синхронизируя его с состоянием системы
+func InitStorage(wgService *wireguard.Service) error {
 	GlobalStorage = &Storage{
 		Servers: make(map[string]*Server),
 		Clients: make(map[string]*Client),
 	}
 
-	GlobalStorage.Servers[GenerateServerID()] = &Server{
-		ID:          GenerateServerID(),
-		Name:        "WireGuard Server",
-		ListenPort:  10000,
-		PrivateKey:  "PrivateKey",
-		PublicKey:   "PublicKey",
-		Network:     "10.0.0.0/24",
-		DNS:         "8.8.8.8",
-		AllowedIPs:  "0.0.0.0/0",
-		Endpoint:    "10.0.0.1:10000",
-		IsActive:    true,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+	if wgService == nil {
+		return nil
 	}
+
+	devices, err := wgService.Devices()
+	if err != nil {
+		if errors.Is(err, wireguard.ErrUnavailable) {
+			return nil
+		}
+		return err
+	}
+
+	now := time.Now()
+	for _, device := range devices {
+		server := convertDeviceToServer(device, now)
+		GlobalStorage.Servers[server.ID] = server
+
+		for _, peer := range device.Peers {
+			client := convertPeerToClient(server.ID, &peer, now)
+			GlobalStorage.Clients[client.ID] = client
+		}
+	}
+
+	return nil
 }
 
 // GenerateServerID генерирует уникальный ID для сервера
@@ -175,7 +189,7 @@ func (s *Storage) GetClientsByServerID(serverID string) map[string]*Client {
 func (s *Storage) GetStats() Stats {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	var stats Stats
 	for _, client := range s.Clients {
 		stats.TotalClients++
@@ -189,6 +203,55 @@ func (s *Storage) GetStats() Stats {
 			stats.DownloadedCount++
 		}
 	}
-	
+
 	return stats
+}
+
+func convertDeviceToServer(device *wireguard.Device, ts time.Time) *Server {
+	server := &Server{
+		ID:         device.Name,
+		Name:       device.Name,
+		ListenPort: device.ListenPort,
+		IsActive:   true,
+		CreatedAt:  ts,
+		UpdatedAt:  ts,
+	}
+
+	if device.HasPublicKey {
+		server.PublicKey = device.PublicKey.String()
+	}
+
+	if device.HasPrivateKey {
+		server.PrivateKey = device.PrivateKey.String()
+	}
+
+	return server
+}
+
+func convertPeerToClient(serverID string, peer *wireguard.Peer, ts time.Time) *Client {
+	allowed := make([]string, 0, len(peer.AllowedIPs))
+	for _, ipNet := range peer.AllowedIPs {
+		allowed = append(allowed, ipNet.String())
+	}
+
+	client := &Client{
+		ID:         GenerateClientID(),
+		ServerID:   serverID,
+		AllowedIPs: strings.Join(allowed, ", "),
+		IsActive:   true,
+		CreatedAt:  ts,
+		UpdatedAt:  ts,
+	}
+
+	if peer.HasPublicKey {
+		key := peer.PublicKey.String()
+		client.Name = key
+		client.PublicKey = key
+	}
+
+	if peer.LastHandshakeTime.IsZero() {
+		client.IsActive = false
+	}
+
+	return client
 }

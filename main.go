@@ -6,13 +6,22 @@ import (
 
 	"wireguard-web-manager/handlers"
 	"wireguard-web-manager/models"
+	"wireguard-web-manager/wireguard"
 
 	"github.com/gin-gonic/gin"
 )
 
 func main() {
-	// Инициализация хранилища данных
-	models.InitStorage()
+	wgService, err := wireguard.NewService()
+	if err != nil {
+		log.Fatalf("не удалось создать клиент WireGuard: %v", err)
+	}
+	defer wgService.Close()
+
+	if err := models.InitStorage(wgService); err != nil {
+		log.Fatalf("не удалось инициализировать хранилище: %v", err)
+	}
+	handlers.RegisterWireGuardService(wgService)
 
 	// Настройка Gin
 	r := gin.Default()

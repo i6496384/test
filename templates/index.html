@@ -1,0 +1,177 @@
+{{template "base.html" .}}
+
+{{define "content"}}
+<div class="row">
+    <div class="col-12">
+        <div class="jumbotron bg-primary text-white p-5 rounded">
+            <h1 class="display-4">
+                <i class="fas fa-shield-alt me-3"></i>
+                WireGuard Web Manager
+            </h1>
+            <p class="lead">
+                Простое веб-приложение для управления серверами и клиентами WireGuard
+            </p>
+            <hr class="my-4">
+            <p>
+                Управляйте конфигурациями серверов, добавляйте клиентов, скачивайте конфигурации 
+                и отслеживайте статистику подключений.
+            </p>
+            <a class="btn btn-light btn-lg" href="/dashboard" role="button">
+                <i class="fas fa-tachometer-alt me-2"></i>
+                Перейти в панель управления
+            </a>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-5">
+    <div class="col-md-4">
+    <div class="col">
+        <div class="card">
+            <div class="card-body text-center">
+                <i class="fas fa-server fa-3x text-primary mb-3"></i>
+                <h5 class="card-title">Управление серверами</h5>
+                <p class="card-text">
+                    Создавайте и настраивайте серверы WireGuard с простым веб-интерфейсом
+                </p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-body text-center">
+                <i class="fas fa-users fa-3x text-success mb-3"></i>
+                <h5 class="card-title">Управление клиентами</h5>
+                <p class="card-text">
+                    Добавляйте клиентов, включайте/отключайте их и скачивайте готовые конфигурации
+                </p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-body text-center">
+                <i class="fas fa-chart-bar fa-3x text-info mb-3"></i>
+                <h5 class="card-title">Статистика</h5>
+                <p class="card-text">
+                    Отслеживайте активные подключения, статистику скачиваний и состояние клиентов
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-5">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">
+                    <i class="fas fa-info-circle me-2"></i>
+                    Возможности системы
+                </h5>
+                <h1>WireGuard Web Manager</h1>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <ul class="list-unstyled">
+                            <li><i class="fas fa-check text-success me-2"></i> Добавление конфигурации сервера</li>
+                            <li><i class="fas fa-check text-success me-2"></i> Управление клиентами</li>
+                            <li><i class="fas fa-check text-success me-2"></i> Скачивание конфигураций клиентов</li>
+                            <li><i class="fas fa-check text-success me-2"></i> Включение/отключение клиентов</li>
+                        </ul>
+                    </div>
+                    <div class="col-md-6">
+                        <ul class="list-unstyled">
+                            <li><i class="fas fa-check text-success me-2"></i> Статистика по клиентам</li>
+                            <li><i class="fas fa-check text-success me-2"></i> Простой веб-интерфейс</li>
+                            <li><i class="fas fa-check text-success me-2"></i> REST API</li>
+                            <li><i class="fas fa-check text-success me-2"></i> Управление в реальном времени</li>
+                        </ul>
+                    </div>
+                </div>
+            <div class="card-body text-center">
+                <p class="lead">
+                    Простое веб-приложение для управления серверами и клиентами WireGuard
+                </p>
+                <p>
+                    Управляйте конфигурациями серверов, добавляйте клиентов, скачивайте конфигурации 
+                    и отслеживайте статистику подключений.
+                </p>
+                <a class="btn btn-primary" href="/dashboard">
+                    Перейти в панель управления
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-4">
+        <div class="card">
+            <div class="card-header">
+                <h3>Управление серверами</h3>
+            </div>
+            <div class="card-body text-center">
+                <p>
+                    Создавайте и настраивайте серверы WireGuard с простым веб-интерфейсом
+                </p>
+            </div>
+        </div>
+    </div>
+    <div class="col-4">
+        <div class="card">
+            <div class="card-header">
+                <h3>Управление клиентами</h3>
+            </div>
+            <div class="card-body text-center">
+                <p>
+                    Добавляйте клиентов, включайте/отключайте их и скачивайте готовые конфигурации
+                </p>
+            </div>
+        </div>
+    </div>
+    <div class="col-4">
+        <div class="card">
+            <div class="card-header">
+                <h3>Статистика</h3>
+            </div>
+            <div class="card-body text-center">
+                <p>
+                    Отслеживайте активные подключения, статистику скачиваний и состояние клиентов
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col">
+        <div class="card">
+            <div class="card-header">
+                <h3>Возможности системы</h3>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-6">
+                        <ul>
+                            <li>✓ Добавление конфигурации сервера</li>
+                            <li>✓ Управление клиентами</li>
+                            <li>✓ Скачивание конфигураций клиентов</li>
+                            <li>✓ Включение/отключение клиентов</li>
+                        </ul>
+                    </div>
+                    <div class="col-6">
+                        <ul>
+                            <li>✓ Статистика по клиентам</li>
+                            <li>✓ Простой веб-интерфейс</li>
+                            <li>✓ REST API</li>
+                            <li>✓ Управление в реальном времени</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}

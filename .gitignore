@@ -1,0 +1,67 @@
+# WireGuard Web Manager - Windows Optimized
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+wireguard-web-manager
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Dependency directories
+vendor/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Windows specific
+*.log
+*.tmp
+*.temp
+
+# Build artifacts
+dist/
+build/
+
+# Uploads directory (can contain sensitive data)
+uploads/*
+!uploads/.gitkeep
+
+# Configuration files
+config.json
+.env
+.env.local
+
+# Backup files
+*.bak
+*.backup
+
+# Certificates (if using HTTPS)
+*.crt
+*.key
+*.pem
+
+# Service files
+wireguard-web-manager.exe.config
+
+# Testing
+coverage.txt

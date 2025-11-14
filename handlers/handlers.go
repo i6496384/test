@@ -1,16 +1,24 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
 	"wireguard-web-manager/models"
+	"wireguard-web-manager/wireguard"
 
 	"github.com/gin-gonic/gin"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
+
+var wgService *wireguard.Service
+
+func RegisterWireGuardService(service *wireguard.Service) {
+	wgService = service
+}
 
 // Index главная страница
 func Index(c *gin.Context) {
@@ -53,14 +61,52 @@ func CreateServer(c *gin.Context) {
 		return
 	}
 
-	server.ID = models.GenerateServerID()
+	if server.Name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "Имя интерфейса обязательно",
+		})
+		return
+	}
+
+	server.ID = server.Name
 	server.CreatedAt = time.Now()
-	server.UpdatedAt = time.Now()
+	server.UpdatedAt = server.CreatedAt
 	server.IsActive = true
 
-	// Генерация ключей (заглушка - в реальности нужна криптография)
-	server.PrivateKey = generateKey()
-	server.PublicKey = generateKey()
+	if server.PrivateKey == "" {
+		key, err := wgtypes.GeneratePrivateKey()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"error":   "Не удалось сгенерировать ключ: " + err.Error(),
+			})
+			return
+		}
+		server.PrivateKey = key.String()
+		server.PublicKey = key.PublicKey().String()
+	} else {
+		key, err := wgtypes.ParseKey(server.PrivateKey)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error":   "Неверный приватный ключ: " + err.Error(),
+			})
+			return
+		}
+		server.PrivateKey = key.String()
+		server.PublicKey = key.PublicKey().String()
+	}
+
+	if wgService != nil {
+		if err := wgService.ConfigureServer(server.ID, server.PrivateKey, server.ListenPort, true, nil); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"error":   "Не удалось настроить интерфейс WireGuard: " + err.Error(),
+			})
+			return
+		}
+	}
 
 	models.GlobalStorage.AddServer(&server)
 
@@ -82,8 +128,56 @@ func UpdateServer(c *gin.Context) {
 		return
 	}
 
-	server.ID = id
+	existing, ok := models.GlobalStorage.GetServer(id)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"error":   "Сервер не найден",
+		})
+		return
+	}
+
+	if server.Name == "" {
+		server.Name = existing.Name
+	}
+
+	if server.Name != existing.Name {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "Переименование интерфейса не поддерживается",
+		})
+		return
+	}
+
+	server.ID = existing.ID
+	server.CreatedAt = existing.CreatedAt
+
+	if server.PrivateKey == "" {
+		server.PrivateKey = existing.PrivateKey
+	}
+
+	key, err := wgtypes.ParseKey(server.PrivateKey)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "Неверный приватный ключ: " + err.Error(),
+		})
+		return
+	}
+	server.PrivateKey = key.String()
+	server.PublicKey = key.PublicKey().String()
+
 	server.UpdatedAt = time.Now()
+
+	if wgService != nil {
+		if err := wgService.ConfigureServer(server.ID, server.PrivateKey, server.ListenPort, false, nil); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"error":   "Не удалось обновить конфигурацию WireGuard: " + err.Error(),
+			})
+			return
+		}
+	}
 
 	models.GlobalStorage.UpdateServer(&server)
 
@@ -96,6 +190,24 @@ func UpdateServer(c *gin.Context) {
 // DeleteServer удаление сервера
 func DeleteServer(c *gin.Context) {
 	id := c.Param("id")
+
+	if server, ok := models.GlobalStorage.GetServer(id); ok {
+		if wgService != nil {
+			if err := wgService.ConfigureServer(server.ID, "", 0, true, nil); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"success": false,
+					"error":   "Не удалось очистить конфигурацию WireGuard: " + err.Error(),
+				})
+				return
+			}
+		}
+
+		clients := models.GlobalStorage.GetClientsByServerID(id)
+		for clientID := range clients {
+			models.GlobalStorage.DeleteClient(clientID)
+		}
+	}
+
 	models.GlobalStorage.DeleteServer(id)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -138,19 +250,107 @@ func CreateClient(c *gin.Context) {
 		return
 	}
 
+	if wgService == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   "Сервис WireGuard недоступен",
+		})
+		return
+	}
+
+	server, ok := models.GlobalStorage.GetServer(client.ServerID)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "Сервер не найден",
+		})
+		return
+	}
+
+	var privateKey wgtypes.Key
+	if client.PrivateKey == "" {
+		key, err := wgtypes.GeneratePrivateKey()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"error":   "Не удалось сгенерировать ключ: " + err.Error(),
+			})
+			return
+		}
+		privateKey = key
+	} else {
+		key, err := wgtypes.ParseKey(client.PrivateKey)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error":   "Неверный приватный ключ клиента: " + err.Error(),
+			})
+			return
+		}
+		privateKey = key
+	}
+
+	allowedInput := splitAllowedIPs(client.AllowedIPs)
+	if len(allowedInput) == 0 {
+		used := make(map[string]struct{})
+		existing := models.GlobalStorage.GetClientsByServerID(server.ID)
+		for _, item := range existing {
+			addr := strings.TrimSpace(item.AllowedIPs)
+			if addr == "" {
+				continue
+			}
+			if idx := strings.Index(addr, "/"); idx > 0 {
+				addr = addr[:idx]
+			}
+			used[addr] = struct{}{}
+		}
+
+		addr, err := wireguard.AllocateAddress(server.Network, used)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error":   "Не удалось выделить IP для клиента: " + err.Error(),
+			})
+			return
+		}
+		allowedInput = []string{addr}
+	}
+
+	allowedNetworks, err := wireguard.ParseAllowedIPs(allowedInput)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	keepalive := 25 * time.Second
+	peerCfg := wgtypes.PeerConfig{
+		PublicKey:                   privateKey.PublicKey(),
+		ReplaceAllowedIPs:           true,
+		AllowedIPs:                  allowedNetworks,
+		PersistentKeepaliveInterval: &keepalive,
+	}
+
+	if err := wgService.ConfigureServer(server.ID, "", 0, false, []wgtypes.PeerConfig{peerCfg}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   "Не удалось добавить клиента в WireGuard: " + err.Error(),
+		})
+		return
+	}
+
 	client.ID = models.GenerateClientID()
+	client.ServerID = server.ID
 	client.CreatedAt = time.Now()
-	client.UpdatedAt = time.Now()
+	client.UpdatedAt = client.CreatedAt
 	client.IsActive = true
 	client.IsDisabled = false
 	client.Downloaded = false
-
-	// Генерация ключей (заглушка)
-	client.PrivateKey = generateKey()
-	client.PublicKey = generateKey()
-
-	// Генерация IP адреса для клиента
-	client.AllowedIPs = generateClientIP()
+	client.PrivateKey = privateKey.String()
+	client.PublicKey = privateKey.PublicKey().String()
+	client.AllowedIPs = strings.Join(allowedInput, ", ")
 
 	models.GlobalStorage.AddClient(&client)
 
@@ -182,7 +382,14 @@ func DownloadClientConfig(c *gin.Context) {
 	}
 
 	// Генерация конфигурации WireGuard
-	config := generateWireGuardConfig(server, client)
+	config, err := generateWireGuardConfig(server, client)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   "Не удалось сформировать конфигурацию: " + err.Error(),
+		})
+		return
+	}
 
 	// Обновление статистики скачиваний
 	client.Downloaded = true
@@ -207,7 +414,18 @@ func DisableClient(c *gin.Context) {
 		return
 	}
 
+	if wgService != nil {
+		if err := wgService.RemovePeer(client.ServerID, client.PublicKey); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"error":   "Не удалось отключить клиента в WireGuard: " + err.Error(),
+			})
+			return
+		}
+	}
+
 	client.IsDisabled = true
+	client.IsActive = false
 	models.GlobalStorage.UpdateClient(client)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -228,7 +446,54 @@ func EnableClient(c *gin.Context) {
 		return
 	}
 
+	server, exists := models.GlobalStorage.GetServer(client.ServerID)
+	if !exists {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"error":   "Сервер не найден",
+		})
+		return
+	}
+
+	allowedInput := splitAllowedIPs(client.AllowedIPs)
+	allowedNetworks, err := wireguard.ParseAllowedIPs(allowedInput)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	pubKey, err := wgtypes.ParseKey(client.PublicKey)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "Некорректный публичный ключ клиента: " + err.Error(),
+		})
+		return
+	}
+
+	keepalive := 25 * time.Second
+	peerCfg := wgtypes.PeerConfig{
+		PublicKey:                   pubKey,
+		ReplaceAllowedIPs:           true,
+		AllowedIPs:                  allowedNetworks,
+		PersistentKeepaliveInterval: &keepalive,
+	}
+
+	if wgService != nil {
+		if err := wgService.ConfigureServer(server.ID, "", 0, false, []wgtypes.PeerConfig{peerCfg}); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"error":   "Не удалось включить клиента в WireGuard: " + err.Error(),
+			})
+			return
+		}
+	}
+
 	client.IsDisabled = false
+	client.IsActive = true
 	models.GlobalStorage.UpdateClient(client)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -240,6 +505,17 @@ func EnableClient(c *gin.Context) {
 // DeleteClient удаление клиента
 func DeleteClient(c *gin.Context) {
 	id := c.Param("id")
+	if client, exists := models.GlobalStorage.GetClient(id); exists {
+		if wgService != nil {
+			if err := wgService.RemovePeer(client.ServerID, client.PublicKey); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"success": false,
+					"error":   "Не удалось удалить клиента из WireGuard: " + err.Error(),
+				})
+				return
+			}
+		}
+	}
 	models.GlobalStorage.DeleteClient(id)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -260,31 +536,59 @@ func GetStats(c *gin.Context) {
 
 // Вспомогательные функции
 
-func generateKey() string {
-	// Заглушка для генерации ключей
-	// В реальности нужно использовать WireGuard криптографию
-	return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl0123456789+/"
-}
+func generateWireGuardConfig(server *models.Server, client *models.Client) (string, error) {
+	if client.PrivateKey == "" {
+		return "", errors.New("у клиента отсутствует приватный ключ")
+	}
 
-func generateClientIP() string {
-	// Простая генерация IP адреса (заглушка)
-	// В реальности нужна проверка на уникальность
-	return "10.0.0." + strconv.Itoa(time.Now().Second()%254+2)
-}
+	allowed := splitAllowedIPs(client.AllowedIPs)
+	if len(allowed) == 0 {
+		return "", errors.New("у клиента не настроены адреса")
+	}
 
-func generateWireGuardConfig(server *models.Server, client *models.Client) string {
 	var config strings.Builder
 
 	config.WriteString("[Interface]\n")
 	config.WriteString("PrivateKey = " + client.PrivateKey + "\n")
-	config.WriteString("Address = " + client.AllowedIPs + "/32\n")
-	config.WriteString("DNS = " + server.DNS + "\n\n")
+	config.WriteString("Address = " + strings.Join(ensureCIDR(allowed), ", ") + "\n")
+	if server.DNS != "" {
+		config.WriteString("DNS = " + server.DNS + "\n")
+	}
+	config.WriteString("\n")
 
 	config.WriteString("[Peer]\n")
 	config.WriteString("PublicKey = " + server.PublicKey + "\n")
-	config.WriteString("Endpoint = " + server.Endpoint + "\n")
-	config.WriteString("AllowedIPs = " + server.AllowedIPs + "\n")
+	if server.Endpoint != "" {
+		config.WriteString("Endpoint = " + server.Endpoint + "\n")
+	}
+	if server.AllowedIPs != "" {
+		config.WriteString("AllowedIPs = " + server.AllowedIPs + "\n")
+	}
 	config.WriteString("PersistentKeepalive = 25\n")
 
-	return config.String()
+	return config.String(), nil
+}
+
+func splitAllowedIPs(value string) []string {
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
+func ensureCIDR(addresses []string) []string {
+	result := make([]string, 0, len(addresses))
+	for _, addr := range addresses {
+		if strings.Contains(addr, "/") {
+			result = append(result, addr)
+			continue
+		}
+		result = append(result, addr+"/32")
+	}
+	return result
 }

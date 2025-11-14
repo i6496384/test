@@ -1,7 +1,6 @@
 package models
 
 import (
-	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -9,6 +8,7 @@ import (
 	"wireguard-web-manager/wireguard"
 
 	"github.com/google/uuid"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 // Server представляет конфигурацию WireGuard сервера
@@ -75,9 +75,6 @@ func InitStorage(wgService *wireguard.Service) error {
 
 	devices, err := wgService.Devices()
 	if err != nil {
-		if errors.Is(err, wireguard.ErrUnavailable) {
-			return nil
-		}
 		return err
 	}
 
@@ -207,28 +204,25 @@ func (s *Storage) GetStats() Stats {
 	return stats
 }
 
-func convertDeviceToServer(device *wireguard.Device, ts time.Time) *Server {
+func convertDeviceToServer(device *wgtypes.Device, ts time.Time) *Server {
 	server := &Server{
 		ID:         device.Name,
 		Name:       device.Name,
 		ListenPort: device.ListenPort,
+		PublicKey:  device.PublicKey.String(),
 		IsActive:   true,
 		CreatedAt:  ts,
 		UpdatedAt:  ts,
 	}
 
-	if device.HasPublicKey {
-		server.PublicKey = device.PublicKey.String()
-	}
-
-	if device.HasPrivateKey {
+	if device.PrivateKey != (wgtypes.Key{}) {
 		server.PrivateKey = device.PrivateKey.String()
 	}
 
 	return server
 }
 
-func convertPeerToClient(serverID string, peer *wireguard.Peer, ts time.Time) *Client {
+func convertPeerToClient(serverID string, peer *wgtypes.Peer, ts time.Time) *Client {
 	allowed := make([]string, 0, len(peer.AllowedIPs))
 	for _, ipNet := range peer.AllowedIPs {
 		allowed = append(allowed, ipNet.String())
@@ -237,16 +231,12 @@ func convertPeerToClient(serverID string, peer *wireguard.Peer, ts time.Time) *C
 	client := &Client{
 		ID:         GenerateClientID(),
 		ServerID:   serverID,
+		Name:       peer.PublicKey.String(),
+		PublicKey:  peer.PublicKey.String(),
 		AllowedIPs: strings.Join(allowed, ", "),
 		IsActive:   true,
 		CreatedAt:  ts,
 		UpdatedAt:  ts,
-	}
-
-	if peer.HasPublicKey {
-		key := peer.PublicKey.String()
-		client.Name = key
-		client.PublicKey = key
 	}
 
 	if peer.LastHandshakeTime.IsZero() {

@@ -1,205 +1,170 @@
 package wireguard
 
 import (
-	"bufio"
-	"bytes"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
-	"os"
-	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
-	"time"
 
-	"golang.org/x/crypto/curve25519"
+	"github.com/vishvananda/netlink"
+	"golang.zx2c4.com/wireguard/wgctrl"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
-var ErrUnavailable = errors.New("wireguard tools are not available")
-
-type Key [32]byte
-
-func GeneratePrivateKey() (Key, error) {
-	var k Key
-	if _, err := rand.Read(k[:]); err != nil {
-		return Key{}, fmt.Errorf("generate private key: %w", err)
-	}
-	k[0] &= 248
-	k[31] &= 127
-	k[31] |= 64
-	return k, nil
-}
-
-func ParseKey(value string) (Key, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return Key{}, errors.New("empty key")
-	}
-	raw, err := base64.StdEncoding.DecodeString(value)
-	if err != nil {
-		return Key{}, fmt.Errorf("decode key: %w", err)
-	}
-	if len(raw) != 32 {
-		return Key{}, fmt.Errorf("key has invalid size: %d", len(raw))
-	}
-	var k Key
-	copy(k[:], raw)
-	return k, nil
-}
-
-func (k Key) String() string {
-	return base64.StdEncoding.EncodeToString(k[:])
-}
-
-func (k Key) PublicKey() Key {
-	var out [32]byte
-	curve25519.ScalarBaseMult(&out, (*[32]byte)(&k))
-	return Key(out)
-}
-
-func (k Key) IsZero() bool {
-	return k == (Key{})
-}
-
-type Device struct {
-	Name          string
-	ListenPort    int
-	PrivateKey    Key
-	PublicKey     Key
-	HasPrivateKey bool
-	HasPublicKey  bool
-	Peers         []Peer
-}
-
-type Peer struct {
-	PublicKey         Key
-	HasPublicKey      bool
-	AllowedIPs        []net.IPNet
-	LastHandshakeTime time.Time
-}
-
-type PeerConfig struct {
-	PublicKey                   Key
-	Remove                      bool
-	ReplaceAllowedIPs           bool
-	AllowedIPs                  []net.IPNet
-	PersistentKeepaliveInterval *time.Duration
-}
-
 type Service struct {
-	mu sync.Mutex
+	mu     sync.Mutex
+	client *wgctrl.Client
 }
 
 func NewService() (*Service, error) {
-	return &Service{}, nil
+	client, err := wgctrl.New()
+	if err != nil {
+		return nil, fmt.Errorf("create wgctrl client: %w", err)
+	}
+
+	return &Service{client: client}, nil
 }
 
 func (s *Service) Close() error {
-	return nil
-}
-
-func (s *Service) Devices() ([]*Device, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	output, err := runCommand("wg", "show", "all", "dump")
-	if err != nil {
-		if errors.Is(err, ErrUnavailable) {
-			return nil, ErrUnavailable
-		}
-		var cmdErr *CommandError
-		if errors.As(err, &cmdErr) {
-			if cmdErr.ExitCode == 1 {
-				return []*Device{}, nil
-			}
-		}
-		return nil, err
+	if s.client == nil {
+		return nil
 	}
-	return parseDump(output)
+
+	err := s.client.Close()
+	s.client = nil
+	return err
 }
 
-func (s *Service) Device(name string) (*Device, error) {
-	if name == "" {
-		return nil, errors.New("device name is required")
-	}
-
+func (s *Service) Devices() ([]*wgtypes.Device, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	output, err := runCommand("wg", "show", name, "dump")
-	if err != nil {
-		if errors.Is(err, ErrUnavailable) {
-			return nil, ErrUnavailable
-		}
-		return nil, err
+	if s.client == nil {
+		return nil, errors.New("wireguard client not initialized")
 	}
 
-	devices, err := parseDump(output)
+	devices, err := s.client.Devices()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list devices: %w", err)
 	}
-	if len(devices) == 0 {
-		return nil, fmt.Errorf("device %s not found", name)
-	}
-	return devices[0], nil
+	return devices, nil
 }
 
-func (s *Service) ConfigureServer(name, privateKey string, listenPort int, replacePeers bool, peers []PeerConfig) error {
+func (s *Service) ConfigureServer(name string, privateKey string, listenPort int, replacePeers bool, peers []wgtypes.PeerConfig) error {
 	if name == "" {
 		return errors.New("device name is required")
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	if err := ensureDevice(name); err != nil {
 		return err
 	}
 
+	var cfg wgtypes.Config
+	cfg.ReplacePeers = replacePeers
+
 	if privateKey != "" {
-		if err := setPrivateKey(name, privateKey); err != nil {
-			return err
+		key, err := wgtypes.ParseKey(privateKey)
+		if err != nil {
+			return fmt.Errorf("parse private key: %w", err)
 		}
+		cfg.PrivateKey = &key
 	}
 
 	if listenPort != 0 {
-		if _, err := runCommand("wg", "set", name, "listen-port", strconv.Itoa(listenPort)); err != nil {
-			return err
-		}
+		cfg.ListenPort = &listenPort
 	}
 
-	if replacePeers {
-		if err := clearPeers(name); err != nil {
-			return err
-		}
+	cfg.Peers = peers
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.client == nil {
+		return errors.New("wireguard client not initialized")
 	}
 
-	for _, peer := range peers {
-		if err := configurePeer(name, peer); err != nil {
-			return err
-		}
+	if err := s.client.ConfigureDevice(name, cfg); err != nil {
+		return fmt.Errorf("configure device %s: %w", name, err)
 	}
-
-	return bringLinkUp(name)
+	return nil
 }
 
 func (s *Service) RemovePeer(deviceName, peerPublicKey string) error {
 	if deviceName == "" {
 		return errors.New("device name is required")
 	}
-	if peerPublicKey == "" {
-		return errors.New("peer public key is required")
+	key, err := wgtypes.ParseKey(peerPublicKey)
+	if err != nil {
+		return fmt.Errorf("parse public key: %w", err)
+	}
+
+	peerCfg := wgtypes.PeerConfig{
+		PublicKey: key,
+		Remove:    true,
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, err := runCommand("wg", "set", deviceName, "peer", peerPublicKey, "remove"); err != nil {
-		return err
+	if s.client == nil {
+		return errors.New("wireguard client not initialized")
+	}
+
+	if err := s.client.ConfigureDevice(deviceName, wgtypes.Config{Peers: []wgtypes.PeerConfig{peerCfg}}); err != nil {
+		return fmt.Errorf("remove peer: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) Device(deviceName string) (*wgtypes.Device, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.client == nil {
+		return nil, errors.New("wireguard client not initialized")
+	}
+
+	device, err := s.client.Device(deviceName)
+	if err != nil {
+		return nil, fmt.Errorf("get device %s: %w", deviceName, err)
+	}
+	return device, nil
+}
+
+func ensureDevice(name string) error {
+	_, err := netlink.LinkByName(name)
+	if err == nil {
+		return bringLinkUp(name)
+	}
+
+	var notFound netlink.LinkNotFoundError
+	if !errors.As(err, &notFound) {
+		return fmt.Errorf("lookup link %s: %w", name, err)
+	}
+
+	link := &netlink.GenericLink{
+		LinkAttrs: netlink.LinkAttrs{Name: name},
+		LinkType:  "wireguard",
+	}
+	if err := netlink.LinkAdd(link); err != nil {
+		return fmt.Errorf("add link %s: %w", name, err)
+	}
+
+	return bringLinkUp(name)
+}
+
+func bringLinkUp(name string) error {
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		return fmt.Errorf("lookup link %s: %w", name, err)
+	}
+	if err := netlink.LinkSetUp(link); err != nil {
+		return fmt.Errorf("set link %s up: %w", name, err)
 	}
 	return nil
 }
@@ -256,263 +221,4 @@ func AllocateAddress(cidr string, used map[string]struct{}) (string, error) {
 	}
 
 	return "", errors.New("no available addresses in network")
-}
-
-type CommandError struct {
-	Command  string
-	Args     []string
-	Output   string
-	ExitCode int
-	Err      error
-}
-
-func (e *CommandError) Error() string {
-	builder := strings.Builder{}
-	builder.WriteString(e.Command)
-	if len(e.Args) > 0 {
-		builder.WriteString(" ")
-		builder.WriteString(strings.Join(e.Args, " "))
-	}
-	if e.Output != "" {
-		builder.WriteString(": ")
-		builder.WriteString(e.Output)
-	}
-	if e.Err != nil {
-		builder.WriteString(": ")
-		builder.WriteString(e.Err.Error())
-	}
-	return builder.String()
-}
-
-func (e *CommandError) Unwrap() error {
-	return e.Err
-}
-
-func runCommand(cmd string, args ...string) ([]byte, error) {
-	command := exec.Command(cmd, args...)
-	output, err := command.CombinedOutput()
-	if err == nil {
-		return output, nil
-	}
-
-	var execErr *exec.Error
-	if errors.As(err, &execErr) && execErr.Err == exec.ErrNotFound {
-		return nil, ErrUnavailable
-	}
-
-	var exitErr *exec.ExitError
-	exitCode := -1
-	if errors.As(err, &exitErr) {
-		exitCode = exitErr.ExitCode()
-	}
-
-	return nil, &CommandError{
-		Command:  cmd,
-		Args:     args,
-		Output:   strings.TrimSpace(string(output)),
-		ExitCode: exitCode,
-		Err:      err,
-	}
-}
-
-func ensureDevice(name string) error {
-	if name == "" {
-		return errors.New("device name is required")
-	}
-
-	if _, err := runCommand("ip", "link", "show", "dev", name); err == nil {
-		return bringLinkUp(name)
-	} else if errors.Is(err, ErrUnavailable) {
-		return err
-	} else {
-		var cmdErr *CommandError
-		if errors.As(err, &cmdErr) {
-			if cmdErr.ExitCode != 1 {
-				return err
-			}
-		} else {
-			return err
-		}
-	}
-
-	if _, err := runCommand("ip", "link", "add", "dev", name, "type", "wireguard"); err != nil {
-		return err
-	}
-	return bringLinkUp(name)
-}
-
-func bringLinkUp(name string) error {
-	if _, err := runCommand("ip", "link", "set", "dev", name, "up"); err != nil {
-		return err
-	}
-	return nil
-}
-
-func setPrivateKey(name, key string) error {
-	file, err := os.CreateTemp("", "wg-key-")
-	if err != nil {
-		return fmt.Errorf("create temp file for key: %w", err)
-	}
-	defer os.Remove(file.Name())
-
-	if _, err := file.WriteString(strings.TrimSpace(key)); err != nil {
-		file.Close()
-		return fmt.Errorf("write private key: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("close private key file: %w", err)
-	}
-
-	if _, err := runCommand("wg", "set", name, "private-key", file.Name()); err != nil {
-		return err
-	}
-	return nil
-}
-
-func configurePeer(name string, cfg PeerConfig) error {
-	if cfg.PublicKey.IsZero() {
-		return errors.New("peer public key is required")
-	}
-
-	args := []string{"set", name, "peer", cfg.PublicKey.String()}
-	if cfg.Remove {
-		args = append(args, "remove")
-		_, err := runCommand("wg", args...)
-		return err
-	}
-
-	if cfg.ReplaceAllowedIPs && len(cfg.AllowedIPs) > 0 {
-		ips := make([]string, 0, len(cfg.AllowedIPs))
-		for _, ipNet := range cfg.AllowedIPs {
-			ips = append(ips, ipNet.String())
-		}
-		args = append(args, "allowed-ips", strings.Join(ips, ","))
-	}
-
-	if cfg.PersistentKeepaliveInterval != nil {
-		secs := int(cfg.PersistentKeepaliveInterval.Round(time.Second) / time.Second)
-		if secs < 0 {
-			secs = 0
-		}
-		args = append(args, "persistent-keepalive", strconv.Itoa(secs))
-	}
-
-	_, err := runCommand("wg", args...)
-	return err
-}
-
-func clearPeers(name string) error {
-	output, err := runCommand("wg", "show", name, "dump")
-	if err != nil {
-		if errors.Is(err, ErrUnavailable) {
-			return err
-		}
-		var cmdErr *CommandError
-		if errors.As(err, &cmdErr) && cmdErr.ExitCode == 1 {
-			return nil
-		}
-		return err
-	}
-
-	devices, err := parseDump(output)
-	if err != nil {
-		return err
-	}
-	if len(devices) == 0 {
-		return nil
-	}
-	for _, peer := range devices[0].Peers {
-		if !peer.HasPublicKey {
-			continue
-		}
-		if _, err := runCommand("wg", "set", name, "peer", peer.PublicKey.String(), "remove"); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func parseDump(data []byte) ([]*Device, error) {
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	var devices []*Device
-	var current *Device
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		fields := strings.Split(line, "\t")
-		if len(fields) == 0 {
-			continue
-		}
-
-		switch fields[0] {
-		case "interface":
-			if len(fields) < 2 {
-				continue
-			}
-			device := &Device{Name: fields[1]}
-			if len(fields) > 2 && fields[2] != "" && fields[2] != "(none)" {
-				if key, err := ParseKey(fields[2]); err == nil {
-					device.PrivateKey = key
-					device.HasPrivateKey = true
-				}
-			}
-			if len(fields) > 3 && fields[3] != "" && fields[3] != "(none)" {
-				if key, err := ParseKey(fields[3]); err == nil {
-					device.PublicKey = key
-					device.HasPublicKey = true
-				}
-			}
-			if len(fields) > 4 {
-				if port, err := strconv.Atoi(fields[4]); err == nil {
-					device.ListenPort = port
-				}
-			}
-			devices = append(devices, device)
-			current = device
-
-		case "peer":
-			if current == nil {
-				continue
-			}
-			if len(fields) < 2 {
-				continue
-			}
-			peer := Peer{}
-			if key, err := ParseKey(fields[1]); err == nil {
-				peer.PublicKey = key
-				peer.HasPublicKey = true
-			}
-
-			if len(fields) > 4 && fields[4] != "" && fields[4] != "(none)" {
-				parts := strings.Split(fields[4], ",")
-				for _, part := range parts {
-					cidr := strings.TrimSpace(part)
-					if cidr == "" {
-						continue
-					}
-					_, network, err := net.ParseCIDR(cidr)
-					if err != nil {
-						continue
-					}
-					peer.AllowedIPs = append(peer.AllowedIPs, *network)
-				}
-			}
-
-			if len(fields) > 5 {
-				if sec, err := strconv.ParseInt(fields[5], 10, 64); err == nil && sec > 0 {
-					peer.LastHandshakeTime = time.Unix(sec, 0)
-				}
-			}
-
-			current.Peers = append(current.Peers, peer)
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-	return devices, nil
 }

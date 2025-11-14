@@ -11,6 +11,7 @@ import (
 	"wireguard-web-manager/wireguard"
 
 	"github.com/gin-gonic/gin"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 var wgService *wireguard.Service
@@ -85,7 +86,7 @@ func CreateServer(c *gin.Context) {
 		server.PrivateKey = key.String()
 		server.PublicKey = key.PublicKey().String()
 	} else {
-		key, err := wireguard.ParseKey(server.PrivateKey)
+		key, err := wgtypes.ParseKey(server.PrivateKey)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"success": false,
@@ -155,7 +156,7 @@ func UpdateServer(c *gin.Context) {
 		server.PrivateKey = existing.PrivateKey
 	}
 
-	key, err := wireguard.ParseKey(server.PrivateKey)
+	key, err := wgtypes.ParseKey(server.PrivateKey)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
@@ -266,9 +267,9 @@ func CreateClient(c *gin.Context) {
 		return
 	}
 
-	var privateKey wireguard.Key
+	var privateKey wgtypes.Key
 	if client.PrivateKey == "" {
-		key, err := wireguard.GeneratePrivateKey()
+		key, err := wgtypes.GeneratePrivateKey()
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"success": false,
@@ -278,7 +279,7 @@ func CreateClient(c *gin.Context) {
 		}
 		privateKey = key
 	} else {
-		key, err := wireguard.ParseKey(client.PrivateKey)
+		key, err := wgtypes.ParseKey(client.PrivateKey)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"success": false,
@@ -325,14 +326,14 @@ func CreateClient(c *gin.Context) {
 	}
 
 	keepalive := 25 * time.Second
-	peerCfg := wireguard.PeerConfig{
+	peerCfg := wgtypes.PeerConfig{
 		PublicKey:                   privateKey.PublicKey(),
 		ReplaceAllowedIPs:           true,
 		AllowedIPs:                  allowedNetworks,
 		PersistentKeepaliveInterval: &keepalive,
 	}
 
-	if err := wgService.ConfigureServer(server.ID, "", 0, false, []wireguard.PeerConfig{peerCfg}); err != nil {
+	if err := wgService.ConfigureServer(server.ID, "", 0, false, []wgtypes.PeerConfig{peerCfg}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"error":   "Не удалось добавить клиента в WireGuard: " + err.Error(),
@@ -464,7 +465,7 @@ func EnableClient(c *gin.Context) {
 		return
 	}
 
-	pubKey, err := wireguard.ParseKey(client.PublicKey)
+	pubKey, err := wgtypes.ParseKey(client.PublicKey)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
@@ -474,7 +475,7 @@ func EnableClient(c *gin.Context) {
 	}
 
 	keepalive := 25 * time.Second
-	peerCfg := wireguard.PeerConfig{
+	peerCfg := wgtypes.PeerConfig{
 		PublicKey:                   pubKey,
 		ReplaceAllowedIPs:           true,
 		AllowedIPs:                  allowedNetworks,
@@ -482,7 +483,7 @@ func EnableClient(c *gin.Context) {
 	}
 
 	if wgService != nil {
-		if err := wgService.ConfigureServer(server.ID, "", 0, false, []wireguard.PeerConfig{peerCfg}); err != nil {
+		if err := wgService.ConfigureServer(server.ID, "", 0, false, []wgtypes.PeerConfig{peerCfg}); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"success": false,
 				"error":   "Не удалось включить клиента в WireGuard: " + err.Error(),

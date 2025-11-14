@@ -5,8 +5,6 @@ go 1.21
 require (
         github.com/gin-gonic/gin v1.9.1
         github.com/google/uuid v1.4.0
-        github.com/vishvananda/netlink v1.1.0
-        golang.zx2c4.com/wireguard/wgctrl v0.0.0-20230309182521-0d2b4e74d553
 )
 
 require (

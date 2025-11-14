@@ -75,7 +75,7 @@ func CreateServer(c *gin.Context) {
 	server.IsActive = true
 
 	if server.PrivateKey == "" {
-		key, err := wgtypes.GeneratePrivateKey()
+		key, err := wireguard.GeneratePrivateKey()
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"success": false,
